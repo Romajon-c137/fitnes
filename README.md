@@ -53,6 +53,10 @@ npm run check                      # сборка + тест
    - Redirect URLs: тот же адрес с `/**` и, для превью-сборок, `https://*-<ваш-аккаунт>.vercel.app/**`.
    Иначе ссылки из писем подтверждения и сброса пароля будут вести на `localhost`.
 
+**Вход через Google.** Кнопка на экране входа работает, когда Google включён в Supabase:
+1. Google Cloud Console → APIs & Services → Credentials → Create credentials → OAuth client ID, тип Web application. В Authorized redirect URIs: `https://<project-ref>.supabase.co/auth/v1/callback`. До этого настройте OAuth consent screen.
+2. Supabase → Authentication → Sign In / Providers → Google: включите, вставьте Client ID и Client Secret, сохраните.
+
 Чтобы собрать версию без входа, запустите `SUPABASE_URL= SUPABASE_ANON_KEY= npm run build`. Локальные переопределения можно положить в `.env` по образцу `.env.example` (`.env` в git не попадает).
 
 Тест режима Supabase работает на заглушке сервера, без сети: `npm run test:supabase`.

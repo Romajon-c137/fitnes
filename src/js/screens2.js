@@ -582,10 +582,19 @@ const AUTH_ERR = {
 const authError = (e) => AUTH_ERR[e && e.code] || (e && /fetch|network/i.test(e.message || '') ? 'Нет связи с сервером. Проверьте подключение.' : 'Не получилось: ' + ((e && e.message) || 'неизвестная ошибка'));
 const redirectUrl = () => location.origin + location.pathname;
 const emailOk = (s) => /^\S+@\S+\.\S+$/.test(s);
+const GOOGLE_G = '<svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>';
+// An OAuth provider sends errors back in the URL (hash or query); show them once and clean the address bar.
+function takeAuthUrlError() {
+  const params = new URLSearchParams(location.hash.slice(1) + '&' + location.search.slice(1));
+  const msg = params.get('error_description') || params.get('error');
+  if (!msg) return '';
+  history.replaceState(null, '', location.pathname);
+  return 'Вход не удался: ' + msg.replace(/\+/g, ' ');
+}
 // Resolves once the person has signed in or chosen to keep data on this device only.
 function authScreen() {
   return new Promise((done) => {
-    const st = { up: false, email: '', pass: '', err: '', info: '', busy: false };
+    const st = { up: false, email: '', pass: '', err: takeAuthUrlError(), info: '', busy: false };
     const draw = () => {
       document.body.classList.add('onb');
       const email = h('input', { class: 'inp', type: 'email', value: st.email, autocomplete: 'email', inputmode: 'email', oninput: (e) => { st.email = e.target.value.trim(); } });
@@ -612,10 +621,22 @@ function authScreen() {
         if (error) { st.err = authError(error); st.info = ''; } else { st.err = ''; st.info = `Ссылка для смены пароля отправлена на ${st.email}.`; }
         draw();
       };
+      const google = async () => {
+        if (st.busy) return;
+        st.busy = true; st.err = ''; st.info = ''; draw();
+        // A disabled provider only fails on Supabase's own page, so check first and explain here instead.
+        const cfg = await fetch(window.REP_CONFIG.supabaseUrl + '/auth/v1/settings', { headers: { apikey: window.REP_CONFIG.supabaseKey } }).then((r) => r.json()).catch(() => null);
+        if (cfg && cfg.external && !cfg.external.google) { st.busy = false; st.err = 'Вход через Google ещё не включён в Supabase (Authentication → Sign In / Providers → Google).'; return draw(); }
+        const { error } = await Store.sb.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: redirectUrl() } }).catch((x) => ({ error: x }));
+        if (error) { st.busy = false; st.err = authError(error); draw(); }
+        // On success the browser is already leaving for Google.
+      };
       $('#view').replaceChildren(h('form', { class: 'onb-wrap', novalidate: true, onsubmit: submit },
         h('div', { class: 'onb-top' }, h('span', { class: 'brand' }, 'Rep')),
         h('h1', { class: 'title' }, st.up ? 'Создать аккаунт' : 'Вход'),
         h('p', { class: 'lead' }, 'Данные хранятся в вашем аккаунте и доступны с любого устройства.'),
+        h('button', { class: 'btn ghost wide', type: 'button', disabled: st.busy, onclick: google }, h('span', { html: GOOGLE_G, style: 'display:flex' }), 'Войти через Google'),
+        h('p', { class: 'muted small center' }, 'или по почте'),
         h('div', { class: 'stack' }, field('Почта', email), field('Пароль', pass, st.up ? 'Не меньше 6 символов.' : null)),
         st.err ? errorText(st.err) : null,
         st.info ? h('p', { class: 'note', role: 'status' }, st.info) : null,

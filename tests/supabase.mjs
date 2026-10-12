@@ -33,7 +33,7 @@ const browser = await chromium.launch();
 const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
 await ctx.route('**/fonts.googleapis.com/**', (r) => r.abort());
 await ctx.route('**/fonts.gstatic.com/**', (r) => r.abort());
-let rejectWrongPassword = true;
+let rejectWrongPassword = true, googleOn = false, authorizeUrl = null;
 await ctx.route(SUPA + '/auth/v1/**', async (r) => {
   const url = new URL(r.request().url());
   const json = (status, body) => r.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body), headers: { 'access-control-allow-origin': '*' } });
@@ -42,6 +42,8 @@ await ctx.route(SUPA + '/auth/v1/**', async (r) => {
     if (rejectWrongPassword && body.password !== 'secret1') return json(400, { code: 'invalid_credentials', error_code: 'invalid_credentials', msg: 'Invalid login credentials' });
     return json(200, session());
   }
+  if (url.pathname.endsWith('/settings')) return json(200, { external: { email: true, google: googleOn } });
+  if (url.pathname.endsWith('/authorize')) { authorizeUrl = url; return r.fulfill({ status: 200, contentType: 'text/html', body: 'google' }); }
   if (url.pathname.endsWith('/logout')) return r.fulfill({ status: 204, headers: { 'access-control-allow-origin': '*' } });
   if (url.pathname.endsWith('/user')) return json(200, USER);
   return json(404, {});
@@ -129,6 +131,18 @@ try {
   await page.reload();
   await page.waitForSelector('text=Вход');
   check('sign-out returns to the sign-in screen', true);
+
+  // Google: a disabled provider is explained in the app, an enabled one redirects to Supabase /authorize.
+  await page.click('text=Войти через Google');
+  await page.waitForSelector('text=Вход через Google ещё не включён');
+  check('disabled Google provider shows a hint', true);
+  googleOn = true;
+  await page.click('text=Войти через Google');
+  await page.waitForURL(/\/auth\/v1\/authorize/);
+  check('Google button redirects to Supabase OAuth', authorizeUrl && authorizeUrl.searchParams.get('provider') === 'google' && /index\.html$/.test(authorizeUrl.searchParams.get('redirect_to') || ''), String(authorizeUrl && authorizeUrl.searchParams.get('redirect_to')));
+  await page.goto(APP + '#error=access_denied&error_description=User+cancelled');
+  await page.waitForSelector('text=Вход не удался: User cancelled');
+  check('OAuth error from the URL is shown and cleared', !(await page.evaluate(() => location.hash)));
 
   check('no runtime errors', errors.length === 0, errors.join(' | '));
 } catch (e) {
