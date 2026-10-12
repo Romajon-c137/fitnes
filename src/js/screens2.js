@@ -405,7 +405,7 @@ SCREENS.progress = () => {
   let note = null;
   if (wk != null && p.goal === 'lose' && -wk > kg * 0.01) note = 'Вы теряете больше 1% веса в неделю. Если есть немного больше, вы сохраните мышцы и энергию.';
   if (wk != null && p.goal === 'gain' && wk > kg * 0.005) note = 'Вы набираете больше 0,5% веса в неделю. С меньшим профицитом обычно меньше прибавляется жира.';
-  if (S.photos === null) { S.photos = 'loading'; Store.query('photo').then((r) => { S.photos = r.map((x) => Object.assign({ key: x.id }, x.data)).sort((a, b) => (b.date + b.created).localeCompare(a.date + a.created)); if (S.tab === 'progress') render({ keepScroll: true }); }); }
+  if (S.photos === null) { S.photos = 'loading'; Store.query('photo').catch(() => []).then((r) => { S.photos = r.map((x) => Object.assign({ key: x.id }, x.data)).sort((a, b) => (b.date + b.created).localeCompare(a.date + a.created)); if (S.tab === 'progress') render({ keepScroll: true }); }); }
   const m = S.meas.entries, mFirst = m[0], mLast = m[m.length - 1];
   const MK = [['chest', 'Грудь'], ['arms', 'Руки'], ['waist', 'Талия'], ['legs', 'Ноги']];
   const sign = (v, d = 1) => (v > 0 ? '+' : v < 0 ? '−' : '±') + dc(Math.abs(round(v, d)));
@@ -523,7 +523,8 @@ SCREENS.profile = () => {
       h('div', { class: 'row between' }, h('h2', { class: 'h2' }, 'Ваши данные'), h('button', { class: 'link', type: 'button', onclick: openEditProfile }, 'Изменить')),
       h('ul', { class: 'kv' }, rows.map(([k, v]) => h('li', null, h('span', { class: 'muted' }, k), h('span', null, v))))),
     h('section', { class: 'blk' }, h('h2', { class: 'h2' }, 'Хранение'),
-      h('p', { class: 'muted' }, Store.mode === 'cloud' ? 'Данные сохраняются в вашем аккаунте Claude. Другие пользователи приложения их не видят.' : Store.readOnlyCloud ? 'Данные сохраняются только на этом устройстве: приложение не может сохранять их в ваш аккаунт. Чтобы синхронизировать устройства, попросите владельца приложения дать вам доступ Contributor.' : 'Данные сохраняются только на этом устройстве.'),
+      Store.sb ? accountBlock() : null,
+      h('p', { class: 'muted' }, Store.mode === 'supabase' ? 'Данные хранятся в вашем аккаунте и синхронизируются между устройствами. Другие пользователи их не видят.' : Store.mode === 'cloud' ? 'Данные сохраняются в вашем аккаунте Claude. Другие пользователи приложения их не видят.' : Store.readOnlyCloud ? 'Данные сохраняются только на этом устройстве: приложение не может сохранять их в ваш аккаунт. Чтобы синхронизировать устройства, попросите владельца приложения дать вам доступ Contributor.' : 'Данные сохраняются только на этом устройстве.'),
       h('button', { class: 'btn ghost danger', type: 'button', onclick: () => confirmSheet('Удалить все данные?', 'Будут удалены профиль, план, дневник питания, тренировки, замеры и фото. Отменить это нельзя.', 'Удалить всё', resetAll, true) }, 'Удалить все данные')),
     h('p', { class: 'muted small center' }, 'Расчёты и планы — общие рекомендации, а не медицинский совет.'));
 };
@@ -545,7 +546,8 @@ function openEditProfile() {
 }
 async function resetAll() {
   const keys = ['profile', 'plan', 'weights', 'measure', 'foods', 'records', ...Object.keys(S.days).map((d) => 'day-' + d)];
-  const more = await Promise.all([Store.query('day'), Store.query('photo')]);
+  const more = await Promise.all([Store.query('day'), Store.query('photo')]).catch(() => null);
+  if (!more) { toast('Не удалось удалить данные. Проверьте подключение и попробуйте ещё раз.'); return; }
   for (const list of more) for (const x of list) keys.push(x.id);
   for (const k of new Set(keys)) Store.set(k, null);
   Object.assign(S, { profile: null, plan: null, weights: { kind: 'weights', entries: [] }, meas: { kind: 'measure', entries: [] }, foods: { kind: 'foods', products: {}, recent: [] }, records: { kind: 'records', ex: {} }, days: {}, done: {}, photos: null, tab: 'home', route: null, active: null });
@@ -553,13 +555,118 @@ async function resetAll() {
   render(); toast('Все данные удалены');
 }
 
+// ================= account (Supabase) =================
+function accountBlock() {
+  if (Store.mode !== 'supabase') {
+    return h('div', { class: 'stack' },
+      h('p', { class: 'muted' }, 'Войдите, чтобы хранить данные в аккаунте и открывать их на любом устройстве. Данные с этого устройства перенесутся в новый аккаунт.'),
+      h('button', { class: 'btn primary', type: 'button', onclick: () => { Store.offline = false; location.reload(); } }, 'Войти или создать аккаунт'));
+  }
+  return h('div', { class: 'row between' },
+    h('span', null, h('span', { class: 'muted' }, 'Аккаунт: '), Store.email),
+    h('button', { class: 'link', type: 'button', onclick: () => confirmSheet('Выйти из аккаунта?', 'Данные останутся в аккаунте. Чтобы снова их увидеть, войдите с той же почтой.', 'Выйти', async () => {
+      await Store.sb.auth.signOut().catch(() => null);
+      Store.offline = false; location.reload();
+    }) }, 'Выйти'));
+}
+const AUTH_ERR = {
+  invalid_credentials: 'Неверная почта или пароль.',
+  email_not_confirmed: 'Почта ещё не подтверждена. Откройте письмо и перейдите по ссылке.',
+  user_already_exists: 'Аккаунт с этой почтой уже есть. Войдите.',
+  weak_password: 'Слишком простой пароль. Нужно не меньше 6 символов.',
+  over_email_send_rate_limit: 'Слишком много писем подряд. Подождите и попробуйте снова.',
+  over_request_rate_limit: 'Слишком много попыток. Подождите минуту и попробуйте снова.',
+  email_address_invalid: 'Проверьте адрес почты.',
+  signup_disabled: 'Регистрация новых аккаунтов отключена.',
+};
+const authError = (e) => AUTH_ERR[e && e.code] || (e && /fetch|network/i.test(e.message || '') ? 'Нет связи с сервером. Проверьте подключение.' : 'Не получилось: ' + ((e && e.message) || 'неизвестная ошибка'));
+const redirectUrl = () => location.origin + location.pathname;
+const emailOk = (s) => /^\S+@\S+\.\S+$/.test(s);
+// Resolves once the person has signed in or chosen to keep data on this device only.
+function authScreen() {
+  return new Promise((done) => {
+    const st = { up: false, email: '', pass: '', err: '', info: '', busy: false };
+    const draw = () => {
+      document.body.classList.add('onb');
+      const email = h('input', { class: 'inp', type: 'email', value: st.email, autocomplete: 'email', inputmode: 'email', oninput: (e) => { st.email = e.target.value.trim(); } });
+      const pass = h('input', { class: 'inp', type: 'password', value: st.pass, autocomplete: st.up ? 'new-password' : 'current-password', minlength: '6', oninput: (e) => { st.pass = e.target.value; } });
+      const submit = async (e) => {
+        e.preventDefault();
+        if (st.busy) return;
+        if (!emailOk(st.email)) { st.err = 'Проверьте адрес почты.'; st.info = ''; return draw(); }
+        if (st.pass.length < 6) { st.err = 'Пароль — не меньше 6 символов.'; st.info = ''; return draw(); }
+        st.busy = true; st.err = ''; st.info = ''; draw();
+        const auth = Store.sb.auth;
+        const { data, error } = await (st.up
+          ? auth.signUp({ email: st.email, password: st.pass, options: { emailRedirectTo: redirectUrl() } })
+          : auth.signInWithPassword({ email: st.email, password: st.pass })).catch((x) => ({ data: {}, error: x }));
+        st.busy = false;
+        if (error) { st.err = authError(error); return draw(); }
+        if (data.session) { Store.useSession(data.session); return done(); }
+        st.info = `Письмо для подтверждения отправлено на ${st.email}. Перейдите по ссылке из письма — приложение откроется уже со входом.`;
+        draw();
+      };
+      const forgot = async () => {
+        if (!emailOk(st.email)) { st.err = 'Введите почту, на которую зарегистрирован аккаунт.'; st.info = ''; return draw(); }
+        const { error } = await Store.sb.auth.resetPasswordForEmail(st.email, { redirectTo: redirectUrl() }).catch((x) => ({ error: x }));
+        if (error) { st.err = authError(error); st.info = ''; } else { st.err = ''; st.info = `Ссылка для смены пароля отправлена на ${st.email}.`; }
+        draw();
+      };
+      $('#view').replaceChildren(h('form', { class: 'onb-wrap', novalidate: true, onsubmit: submit },
+        h('div', { class: 'onb-top' }, h('span', { class: 'brand' }, 'Rep')),
+        h('h1', { class: 'title' }, st.up ? 'Создать аккаунт' : 'Вход'),
+        h('p', { class: 'lead' }, 'Данные хранятся в вашем аккаунте и доступны с любого устройства.'),
+        h('div', { class: 'stack' }, field('Почта', email), field('Пароль', pass, st.up ? 'Не меньше 6 символов.' : null)),
+        st.err ? errorText(st.err) : null,
+        st.info ? h('p', { class: 'note', role: 'status' }, st.info) : null,
+        h('div', { class: 'onb-foot stack' },
+          h('button', { class: 'btn primary wide', type: 'submit', disabled: st.busy }, st.busy ? 'Подождите…' : st.up ? 'Зарегистрироваться' : 'Войти'),
+          h('button', { class: 'btn ghost wide', type: 'button', onclick: () => { st.up = !st.up; st.err = ''; st.info = ''; draw(); } }, st.up ? 'У меня уже есть аккаунт' : 'Создать аккаунт'),
+          st.up ? null : h('button', { class: 'link', type: 'button', onclick: forgot }, 'Забыли пароль?'),
+          h('button', { class: 'link', type: 'button', onclick: () => { Store.offline = true; done(); } }, 'Продолжить без аккаунта'))));
+    };
+    draw();
+  });
+}
+// Opened from the password-reset email: ask for a new password.
+function watchPasswordRecovery() {
+  if (!Store.sb) return;
+  Store.sb.auth.onAuthStateChange((event) => {
+    if (event !== 'PASSWORD_RECOVERY') return;
+    setTimeout(() => {
+      const pass = h('input', { class: 'inp', type: 'password', autocomplete: 'new-password', minlength: '6' });
+      const err = h('div');
+      const sh = openSheet('Новый пароль', h('div', { class: 'stack' }, field('Новый пароль', pass, 'Не меньше 6 символов.'), err,
+        h('button', { class: 'btn primary wide', type: 'button', onclick: async () => {
+          if (pass.value.length < 6) { err.replaceChildren(errorText('Пароль — не меньше 6 символов.')); return; }
+          const { error } = await Store.sb.auth.updateUser({ password: pass.value }).catch((x) => ({ error: x }));
+          if (error) { err.replaceChildren(errorText(authError(error))); return; }
+          sh.close(true); toast('Пароль изменён');
+        } }, 'Сохранить пароль')));
+    }, 0);
+  });
+}
+
 // ================= start =================
 async function start() {
   buildNav(); buildRestbar(); buildLivebar();
-  $('#view').replaceChildren(h('div', { class: 'loading' }, h('span', { class: 'spin' }), h('span', { class: 'muted' }, 'Загружаем ваши данные…')));
+  const loading = () => $('#view').replaceChildren(h('div', { class: 'loading' }, h('span', { class: 'spin' }), h('span', { class: 'muted' }, 'Загружаем ваши данные…')));
+  loading();
   initAI();
-  await Store.init();
-  await loadAll();
+  try { await Store.init(); } catch { /* stay on device */ }
+  watchPasswordRecovery();
+  if (Store.needsAuth) { await authScreen(); loading(); }
+  try {
+    if (Store.mode === 'supabase') await Store.adoptLocal();
+    await loadAll();
+  } catch {
+    document.body.classList.add('onb');
+    $('#view').replaceChildren(h('div', { class: 'onb-wrap' },
+      h('h1', { class: 'title' }, 'Не удалось загрузить данные'),
+      h('p', { class: 'lead' }, 'Проверьте подключение к интернету и попробуйте ещё раз.'),
+      h('div', { class: 'onb-foot' }, h('button', { class: 'btn primary wide', type: 'button', onclick: () => location.reload() }, 'Повторить'))));
+    return;
+  }
   const closed = findActive();
   render();
   if (closed) toast('Незавершённая тренировка закрыта по времени последнего подхода.');

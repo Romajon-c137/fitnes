@@ -51,11 +51,19 @@ const fmtSec = (s) => `${Math.floor(s / 60)}:${pad2(Math.floor(s % 60))}`;
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 
 // ================= storage =================
+// Supabase mode: rows of public.docs (one per key) for the signed-in user; set up when the build has REP_CONFIG.
 // Cloud mode: each person's own private subtree data/users/<id>/ in the artifact db.
 // Device mode: localStorage (chat preview, signed-out, or no write access).
 const Store = {
-  mode: 'device', db: null, uid: null, cache: {}, q: {},
+  mode: 'device', db: null, sb: null, uid: null, email: '', cache: {}, q: {},
   async init() {
+    const cfg = window.REP_CONFIG;
+    if (cfg && window.supabase) {
+      this.sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseKey);
+      const { data } = await this.sb.auth.getSession();
+      if (data && data.session) this.useSession(data.session);
+      return;
+    }
     const c = window.claude;
     if (!c || typeof c.use !== 'function') return;
     try {
@@ -70,9 +78,39 @@ const Store = {
       if (canWrite === false) this.readOnlyCloud = true;
     } catch { /* stay on device */ }
   },
+  useSession(session) { this.mode = 'supabase'; this.uid = session.user.id; this.email = session.user.email || ''; },
+  // Supabase is configured but nobody is signed in and they have not chosen to stay on this device.
+  get needsAuth() { return !!this.sb && this.mode !== 'supabase' && !this.offline; },
+  get offline() { try { return localStorage.getItem('fitapp:offline') === '1'; } catch { return false; } },
+  set offline(v) { try { if (v) localStorage.setItem('fitapp:offline', '1'); else localStorage.removeItem('fitapp:offline'); } catch { /* ignore */ } },
+  docs() { return this.sb.from('docs'); },
+  // First sign-in on a device that already has data: copy it into the empty account.
+  async adoptLocal() {
+    if (await this.get('profile')) return;
+    const pre = 'fitapp:local:', rows = [];
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (!k.startsWith(pre)) continue;
+        const v = JSON.parse(localStorage.getItem(k));
+        if (v) rows.push(this.row(k.slice(pre.length), v));
+      }
+    } catch { return; }
+    for (let i = 0; i < rows.length; i += 20) {
+      const { error } = await this.docs().upsert(rows.slice(i, i + 20));
+      if (error) throw error;
+    }
+  },
+  row(key, val) { return { user_id: this.uid, key, kind: val.kind || null, date: val.date || null, data: val, updated_at: new Date().toISOString() }; },
   ref(key) { return this.db.doc('data/users/' + this.uid + '/' + key); },
   lsKey(key) { return 'fitapp:' + (this.uid || 'local') + ':' + key; },
+  // In Supabase mode reads throw on failure, so a network error is never mistaken for an empty account.
   async get(key) {
+    if (this.mode === 'supabase') {
+      const { data, error } = await this.docs().select('data').eq('user_id', this.uid).eq('key', key).maybeSingle();
+      if (error) throw error;
+      return data ? data.data : null;
+    }
     if (this.mode === 'cloud') {
       try { const s = await this.ref(key).get(); return s.exists ? JSON.parse(JSON.stringify(s.data())) : null; }
       catch (e) { return null; }
@@ -80,6 +118,13 @@ const Store = {
     try { const v = localStorage.getItem(this.lsKey(key)); return v ? JSON.parse(v) : null; } catch { return null; }
   },
   async query(kind, since) {
+    if (this.mode === 'supabase') {
+      let q = this.docs().select('key, data').eq('user_id', this.uid).eq('kind', kind);
+      if (since) q = q.gte('date', since);
+      const { data, error } = await q.limit(1000);
+      if (error) throw error;
+      return data.map((r) => ({ id: r.key, data: r.data }));
+    }
     if (this.mode === 'cloud') {
       try {
         let q = this.db.collection('data/users/' + this.uid).where('kind', '==', kind);
@@ -116,6 +161,17 @@ const Store = {
     q.busy = false;
   },
   async _write(key, val) {
+    if (this.mode === 'supabase') {
+      for (let attempt = 0; ; attempt++) {
+        const { error } = val === null
+          ? await this.docs().delete().eq('user_id', this.uid).eq('key', key)
+          : await this.docs().upsert(this.row(key, val));
+        if (!error) return;
+        // No code means the request never reached the server: retry once after a short pause.
+        if (error.code || attempt) throw error;
+        await new Promise((r) => setTimeout(r, 600 + Math.random() * 900));
+      }
+    }
     if (this.mode === 'cloud') {
       try { await (val === null ? this.ref(key).delete() : this.ref(key).set(val)); }
       catch (e) {

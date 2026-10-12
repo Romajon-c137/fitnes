@@ -29,6 +29,8 @@ await page.route('**/cdn.jsdelivr.net/npm/three@0.149.0/build/three.min.js', (r)
 await page.clock.install();
 
 try {
+  // Device mode: skip the Supabase sign-in screen (tests/supabase.mjs covers it).
+  await page.addInitScript(() => localStorage.setItem('fitapp:offline', '1'));
   await page.goto(APP);
   await page.clock.runFor(800);
 
